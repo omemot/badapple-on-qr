@@ -129,6 +129,10 @@ BA5:
 - Right QR: frame n+2
 - Display in the order they are read
 
+
+```
+JP🇯🇵
+```
 # BA4 QR Real
 
 実働版です。テンプレではありません 🍎📷
