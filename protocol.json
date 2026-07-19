@@ -1,0 +1,15 @@
+{
+  "protocol": "BA4",
+  "meta": "M|width|height|fps|title",
+  "frame": "F|frame|startColor|base36-rle|fpsx10",
+  "startColor": {
+    "0": "black",
+    "1": "white"
+  },
+  "fpsx10": "integer, 97 means 9.7 FPS",
+  "notes": [
+    "resolution and title are sent once in meta",
+    "frames omit width/height/fps target",
+    "actual FPS is preserved per frame"
+  ]
+}

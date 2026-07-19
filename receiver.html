@@ -1,0 +1,252 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>BA4 QR Receiver</title>
+<style>
+  body {
+    margin: 0;
+    background: #000;
+    color: white;
+    font-family: monospace;
+    text-align: center;
+  }
+  h1 { margin: 14px 0 8px; }
+  button {
+    font: inherit;
+    font-size: 16px;
+    padding: 8px 14px;
+    margin: 4px;
+    cursor: pointer;
+  }
+  #reader {
+    width: 360px;
+    margin: 8px auto;
+  }
+  #screen {
+    image-rendering: pixelated;
+    margin-top: 10px;
+    border: 1px solid #333;
+  }
+  #log {
+    font-size: 15px;
+    white-space: pre-wrap;
+    text-align: left;
+    max-width: 760px;
+    margin: 10px auto;
+    background: #111;
+    padding: 10px;
+    border-radius: 8px;
+  }
+</style>
+<body>
+  <h1>BA4 QR Receiver</h1>
+  <button id="startBtn">START CAMERA</button>
+  <button id="stopBtn">STOP</button>
+  <button id="clearBtn">CLEAR META</button>
+
+  <div id="reader"></div>
+  <canvas id="screen"></canvas>
+  <pre id="log">Ready</pre>
+
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <script>
+    const log = document.getElementById("log");
+    const canvas = document.getElementById("screen");
+    const ctx = canvas.getContext("2d");
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const clearBtn = document.getElementById("clearBtn");
+
+    let scanner = null;
+    let meta = null;
+    let lastFrame = -1;
+    let lastRecvTime = performance.now();
+    let receivedCount = 0;
+
+    function setLog(s) {
+      log.textContent = s;
+    }
+
+    function secureStatus() {
+      return [
+        `href: ${location.href}`,
+        `isSecureContext: ${window.isSecureContext}`,
+        `mediaDevices: ${navigator.mediaDevices ? "OK" : "undefined"}`
+      ].join("\n");
+    }
+
+    function decodeRuns(start, rle, total) {
+      let bit = Number(start);
+      const bits = [];
+      const runs = rle.split(".");
+      for (const part of runs) {
+        if (!part) continue;
+        const n = parseInt(part, 36);
+        if (!Number.isFinite(n)) continue;
+        for (let i = 0; i < n; i++) bits.push(bit ? "1" : "0");
+        bit = bit ? 0 : 1;
+      }
+      while (bits.length < total) bits.push("0");
+      return bits.slice(0, total);
+    }
+
+    function draw(bits, fps, frame) {
+      const w = meta.width;
+      const h = meta.height;
+      const scale = Math.max(8, Math.floor(384 / w));
+
+      canvas.width = w * scale;
+      canvas.height = h * scale + 30;
+
+      ctx.fillStyle = "black";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = "white";
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (bits[y * w + x] === "1") {
+            ctx.fillRect(x * scale, y * scale, scale, scale);
+          }
+        }
+      }
+
+      ctx.fillStyle = "white";
+      ctx.font = "20px monospace";
+      ctx.fillText(`Frame:${frame} FPS:${fps.toFixed(1)}`, 8, canvas.height - 7);
+    }
+
+    function handleMeta(parts, raw) {
+      // M|width|height|fps|title
+      meta = {
+        width: Number(parts[1]),
+        height: Number(parts[2]),
+        fps: Number(parts[3]),
+        title: parts.slice(4).join("|") || "UNTITLED"
+      };
+      localStorage.setItem("ba4-meta", JSON.stringify(meta));
+      setLog(
+        `META OK\n` +
+        `title: ${meta.title}\n` +
+        `size: ${meta.width}x${meta.height}\n` +
+        `fps: ${meta.fps}\n` +
+        `raw: ${raw.length} chars\n\n` +
+        secureStatus()
+      );
+    }
+
+    function handleFrame(parts, raw) {
+      // F|frame|start|rle|fpsx10
+      if (!meta) {
+        const saved = localStorage.getItem("ba4-meta");
+        if (saved) meta = JSON.parse(saved);
+      }
+      if (!meta) {
+        setLog(`FRAME received but META missing\nRead the M|... QR first.\nraw:${raw.slice(0, 80)}...`);
+        return;
+      }
+
+      const frame = Number(parts[1]);
+      if (frame === lastFrame) return;
+      lastFrame = frame;
+
+      const start = parts[2];
+      const rle = parts[3];
+      const sentFps = Number(parts[4] || 0) / 10;
+
+      const now = performance.now();
+      const recvFps = 1000 / Math.max(1, now - lastRecvTime);
+      lastRecvTime = now;
+      receivedCount++;
+
+      const bits = decodeRuns(start, rle, meta.width * meta.height);
+      draw(bits, sentFps || recvFps, frame);
+
+      setLog(
+        `FRAME OK\n` +
+        `title: ${meta.title}\n` +
+        `frame: ${frame}\n` +
+        `sent FPS: ${sentFps.toFixed(1)}\n` +
+        `receive FPS: ${recvFps.toFixed(2)}\n` +
+        `payload: ${raw.length} chars\n` +
+        `received: ${receivedCount}\n\n` +
+        secureStatus()
+      );
+    }
+
+    function onScan(text) {
+      const parts = text.split("|");
+      if (parts[0] === "M") return handleMeta(parts, text);
+      if (parts[0] === "F") return handleFrame(parts, text);
+    }
+
+    async function startCamera() {
+      setLog("Starting camera...\n" + secureStatus());
+
+      if (!window.isSecureContext || !navigator.mediaDevices) {
+        setLog(
+          "Camera API unavailable.\n" +
+          "Open with https:// or localhost, or use Chrome flag:\n" +
+          "Insecure origins treated as secure\n\n" +
+          secureStatus()
+        );
+        return;
+      }
+
+      scanner = new Html5Qrcode("reader");
+      try {
+        await scanner.start(
+          { facingMode: "environment" },
+          {
+            fps: 15,
+            qrbox: { width: 300, height: 300 },
+            aspectRatio: 1.0
+          },
+          onScan,
+          () => {}
+        );
+        setLog("Camera started.\nRead META first.\n\n" + secureStatus());
+      } catch (e) {
+        setLog(
+          "Camera start error\n" +
+          `name: ${e?.name}\n` +
+          `message: ${e?.message}\n` +
+          `raw: ${String(e)}\n\n` +
+          secureStatus()
+        );
+      }
+    }
+
+    async function stopCamera() {
+      if (!scanner) return;
+      try {
+        await scanner.stop();
+        await scanner.clear();
+      } catch (e) {}
+      scanner = null;
+      setLog("Stopped.\n" + secureStatus());
+    }
+
+    function clearMeta() {
+      meta = null;
+      localStorage.removeItem("ba4-meta");
+      lastFrame = -1;
+      receivedCount = 0;
+      setLog("META cleared.\nRead M|... again.");
+    }
+
+    startBtn.onclick = startCamera;
+    stopBtn.onclick = stopCamera;
+    clearBtn.onclick = clearMeta;
+
+    const saved = localStorage.getItem("ba4-meta");
+    if (saved) {
+      try {
+        meta = JSON.parse(saved);
+        setLog(`Ready\nLoaded saved META: ${meta.title} ${meta.width}x${meta.height} ${meta.fps}fps\n\n${secureStatus()}`);
+      } catch {
+        setLog("Ready\n" + secureStatus());
+      }
+    } else {
+      setLog("Ready\nRead META first.\n\n" + secureStatus());
+    }
+  </script>
+</body>
